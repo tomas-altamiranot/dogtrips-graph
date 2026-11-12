@@ -1,0 +1,29 @@
+# Entorno virtual
+.venv/
+
+# Credenciales: NUNCA suben al repositorio
+.env
+
+# Cache de Python
+__pycache__/
+*.pyc
+
+# Configuracion personal del IDE
+.idea/
+.vscode/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Basura de Windows
+Thumbs.db
+desktop.ini
+
+#Contexto propio
+Contexto/
+
+#Contexto agente
+CLAUDE.md
+
+# Configuracion de herramientas, no del proyecto (igual que .idea/)
+.claude/
