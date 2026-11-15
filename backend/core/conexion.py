@@ -10,6 +10,7 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
+import certifi
 from dotenv import load_dotenv
 from neo4j import Driver, GraphDatabase
 from neo4j.exceptions import AuthError, ServiceUnavailable
@@ -17,6 +18,19 @@ from neo4j.exceptions import AuthError, ServiceUnavailable
 # El .env vive en la raíz del repositorio, dos niveles arriba de este archivo.
 RAIZ = Path(__file__).resolve().parents[2]
 load_dotenv(RAIZ / ".env")
+
+# En Windows, el módulo ssl de Python verifica contra el almacén de certificados
+# del sistema operativo, no contra certifi. El certificado de AuraDB encadena a
+# "SSL.com TLS RSA Root CA 2022", una raíz que Windows no siempre tiene
+# instalada, y la conexión falla con CERTIFICATE_VERIFY_FAILED aunque el
+# certificado del servidor sea válido.
+#
+# Apuntar SSL_CERT_FILE al bundle de certifi, que sí incluye esa raíz, resuelve
+# el problema SIN desactivar la verificación: la alternativa habitual
+# (neo4j+ssc://) acepta cualquier certificado y deja la conexión expuesta a
+# suplantación. Se usa setdefault para respetar un valor que ya venga del
+# entorno.
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
 _driver: Driver | None = None
 
