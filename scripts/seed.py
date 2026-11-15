@@ -95,6 +95,40 @@ MOTIVOS_CONFLICTO = [
     "Marcaje territorial", "Intento de monta",
 ]
 
+# Combinaciones de rasgos que hacen dificil un paseo grupal.
+#
+# Los datos sinteticos las incorporan A PROPOSITO: si las calificaciones fueran
+# aleatorias, la consulta 5 devolveria ruido con apariencia de hallazgo. Al
+# sembrar una correlacion conocida se puede VERIFICAR que la consulta la
+# detecta, que es la unica forma de saber que funciona.
+#
+# En la defensa esto se dice tal cual: los datos modelan la regla de negocio que
+# la consulta debe descubrir.
+COMBINACIONES_DIFICILES = [
+    ("Reactivo", "Dominante"),
+    ("Ansioso", "Dominante"),
+    ("Reactivo", "Escapista"),
+]
+
+
+def calificar_paseo(ids: list[str], rasgos: dict[str, set[str]]) -> int:
+    """Calificacion de un paseo grupal segun los rasgos de quienes van.
+
+    Cuenta cuantas combinaciones dificiles aparecen entre los perros del paseo y
+    baja la calificacion en consecuencia, con ruido para que no sea determinista.
+    """
+    presentes: set[str] = set()
+    for d in ids:
+        presentes |= rasgos.get(d, set())
+
+    choques = sum(1 for a, b in COMBINACIONES_DIFICILES if a in presentes and b in presentes)
+
+    if choques == 0:
+        return random.choice([5, 5, 5, 5, 4, 4])
+    if choques == 1:
+        return random.choice([5, 4, 4, 4, 3])
+    return random.choice([4, 3, 3, 2, 2])
+
 HOY = date(2026, 11, 14)
 
 
@@ -160,7 +194,10 @@ def generar():
         })
 
     # --- Rasgos por perro ---
+    # Se guardan dos veces: como lista de filas para escribir en el grafo, y como
+    # diccionario para poder consultarlos al calificar los paseos.
     rasgos_perro = []
+    rasgos_por_perro: dict[str, set[str]] = {}
     for p in perros:
         sociales = [r for r, c in RASGOS if c == "social"]
         temperamentos = [r for r, c in RASGOS if c == "temperamento"]
@@ -168,6 +205,7 @@ def generar():
         elegidos = {random.choice(sociales), random.choice(temperamentos)}
         if random.random() < 0.6:
             elegidos.add(random.choice(manejos))
+        rasgos_por_perro[p["id"]] = elegidos
         for r in elegidos:
             rasgos_perro.append({"dogId": p["id"], "trait": r})
 
@@ -204,20 +242,22 @@ def generar():
         for _ in range(random.randint(8, 12)):
             n += 1
             pid = f"wal-{n:04d}"
-            # La mayoria sale bien; un 15% sale mal y da material a la consulta 5.
-            rating = 5 if random.random() < 0.55 else (4 if random.random() < 0.7 else random.choice([2, 3]))
+
+            # Primero se elige QUIENES van, porque la calificacion depende de sus
+            # rasgos. Al reves seria calificar un paseo antes de saber quien fue.
+            k = random.randint(3, len(camada["perros"]))
+            asistentes = random.sample(camada["perros"], k)
+
             paseos.append({
                 "id": pid,
                 "date": iso(random.randint(1, 120)),
                 "durationMin": random.choice([30, 45, 60]),
                 "distanceKm": round(random.uniform(1.5, 5.0), 1),
                 "type": "grupal",
-                "rating": rating,
+                "rating": calificar_paseo(asistentes, rasgos_por_perro),
                 "walkerId": paseador["id"],
             })
-            # Entre 3 y todos los miembros de la camada
-            k = random.randint(3, len(camada["perros"]))
-            for dog_id in random.sample(camada["perros"], k):
+            for dog_id in asistentes:
                 participaciones.append({"dogId": dog_id, "walkId": pid})
 
     # Individuales: aqui si da igual quien, porque no generan compatibilidad.

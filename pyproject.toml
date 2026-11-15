@@ -14,6 +14,9 @@ dependencies = [
     "streamlit>=1.40",
 ]
 
+[tool.pyright]
+extraPaths = ["backend"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
