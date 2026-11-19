@@ -13,7 +13,7 @@ from pathlib import Path
 
 import certifi
 from dotenv import load_dotenv
-from neo4j import Driver, GraphDatabase, RoutingControl
+from neo4j import Driver, GraphDatabase, Result, RoutingControl
 from neo4j.exceptions import AuthError, ServiceUnavailable, SessionExpired
 
 # El .env vive en la raíz del repositorio, dos niveles arriba de este archivo.
@@ -153,6 +153,21 @@ def leer(consulta: str, **parametros) -> list[dict]:
         consulta, parametros, routing_=RoutingControl.READ, database_=base
     )
     return [f.data() for f in filas]
+
+
+def leer_grafo(consulta: str, **parametros):
+    """Ejecuta una consulta de lectura y devuelve un neo4j.graph.Graph.
+
+    Result.graph() junta todos los nodos y relaciones que aparecen en el
+    resultado (sueltos, en listas o dentro de caminos) en un solo objeto. Es lo
+    que se dibuja en el cliente: el dibujo muestra exactamente lo que devolvio
+    la base, no una reconstruccion.
+    """
+    _, _, _, base = _leer_config()
+    return obtener_driver().execute_query(
+        consulta, parametros, routing_=RoutingControl.READ, database_=base,
+        result_transformer_=Result.graph,
+    )
 
 
 def escribir(consulta: str, **parametros) -> list[dict]:
