@@ -10,7 +10,7 @@ El sistema responde tres preguntas que una base relacional contesta con dificult
 3. **¿Qué combinaciones terminan mal?**
 
 **Bases de Datos Avanzadas — Universidad Anáhuac Mayab**
-Proyecto individual · Neo4j AuraDB · Django REST Framework
+Proyecto individual · Neo4j AuraDB · driver oficial `neo4j` para Python
 
 ---
 
@@ -18,13 +18,13 @@ Proyecto individual · Neo4j AuraDB · Django REST Framework
 
 | Componente | Estado |
 |---|---|
-| Conexión a Neo4j AuraDB con credenciales por entorno | ✅ Operativa |
-| Modelo del grafo | ✅ Cerrado |
-| Script de datos sintéticos | 🚧 Siguiente |
-| CRUD sobre dueños, perros y paseadores | 🚧 Pendiente |
-| Las 5 consultas especializadas | 🚧 Pendiente |
-| API REST con Django | 🚧 Pendiente |
-| Cliente de demostración | 🚧 Pendiente |
+| Conexión a Neo4j AuraDB con credenciales por entorno y reintento automático | ✅ |
+| Modelo del grafo (7 etiquetas, 12 tipos de relación) | ✅ |
+| Script de datos sintéticos (`seed.py`) | ✅ 288 nodos · 933 relaciones |
+| CRUD sobre dueños, perros y paseadores (menú en terminal) | ✅ |
+| Las 5 consultas especializadas | ✅ Probadas contra la nube |
+| Interfaz gráfica (Streamlit) que dibuja el grafo consultado en vivo | ✅ |
+| API REST con Django | Trabajo futuro |
 
 ---
 
@@ -40,137 +40,159 @@ cada paseo.
 ### El problema central: los paseos grupales
 
 Un paseo grupal es más barato para el dueño y más rentable para el paseador. Pero no
-cualquier grupo funciona, y **la compatibilidad no es transitiva**:
+cualquier grupo funciona, y **la compatibilidad no es transitiva**. En los datos del proyecto:
 
 ```
-        Max ──✓── Nina
-         │         │
-         ✗         ✓        Max y Nina se llevan bien.
-         │         │        Nina y Toby se llevan bien.
-         └── Toby ─┘        Max y Toby NO.
+        Toby ──✓── Bruno
+          │          │
+          ✗          ✓        Toby y Bruno se llevan bien.
+          │          │        Bruno y Bacab se llevan bien.
+          └─ Bacab ──┘        Toby y Bacab tuvieron un incidente.
 ```
 
-Armar un grupo de tres no es elegir tres perros compatibles con el primero: es encontrar un
-subconjunto donde **todos los pares** funcionan. Eso tiene nombre en teoría de grafos
-—buscar un **clique**— y es el requisito que define este proyecto.
+Armar un grupo no es elegir perros compatibles con el primero: es encontrar un subconjunto
+donde **todos los pares** funcionan. En teoría de grafos eso se llama **clique**.
 
-> **Datos sintéticos.** Todo se genera por script. No hay información de personas, perros ni
-> paseadores reales. Las colonias son de Mérida, Yucatán, para que la demo sea verosímil.
+### Lo que declara el dueño y lo que observa el paseador
+
+El grafo separa dos fuentes de información:
+
+| Fuente | Relación | Para qué se usa |
+|---|---|---|
+| El dueño, al registrar al perro | `(:Dog)-[:HAS_TRAIT]->(:Trait)` | Qué paseador está capacitado (consulta 4) y qué perros se parecen (consulta 1) |
+| El paseador, en cada paseo | `(:Dog)-[:JOINED]->(:Walk {rating})`, `[:CONFLICTED_WITH]` | Quién puede salir con quién (consulta 2) |
+
+La compatibilidad entre perros se decide **solo con lo observado en paseos**. Un perro que en
+casa no tolera a otro puede llevarse bien con él en la calle; lo que cuenta es lo que pasó
+en el paseo.
+
+> **Datos sintéticos.** Todo se genera con `scripts/seed.py`. No hay información de
+> personas, perros ni paseadores reales. Las colonias son de Mérida, Yucatán. El seed
+> **simula** el historial de paseos, calificaciones e incidentes que produciría la app del
+> paseador.
 
 ---
 
 ## 2. Por qué un grafo y no SQL
 
-### 2.1 Formar grupos es un problema de grafos, literalmente
+### 2.1 Formar grupos es un problema de grafos
 
 Dos perros son compatibles si **ya coincidieron en un paseo bien calificado** y **no existe
-un incidente registrado** entre ellos. En Cypher, "no hay conflicto entre A y B" se escribe
-tal cual:
+un incidente registrado** entre ellos. Para un grupo hay que revisar cada par: 3 perros son
+3 pares, 4 son 6 y 5 son 10.
+
+En SQL cada par es un `EXISTS` más un `NOT EXISTS`, y cada perro es otra tabla en el `FROM`:
+**la consulta se reescribe cada vez que cambia el tamaño del grupo**. En Cypher la regla
+"todos con todos" se escribe una vez y el tamaño es un parámetro:
 
 ```cypher
-WHERE NOT (a)-[:CONFLICTED_WITH]-(b)
+UNWIND apoc.coll.combinations(candidatos, $tamano - 1) AS grupo
+WITH base, grupo
+WHERE ALL(x IN grupo WHERE ALL(y IN grupo WHERE
+        elementId(x) >= elementId(y)
+        OR (NOT (x)-[:CONFLICTED_WITH]-(y)
+            AND EXISTS { (x)-[:JOINED]->(k:Walk)<-[:JOINED]-(y) WHERE k.rating >= $minimo })))
 ```
-
-En SQL eso es un `NOT EXISTS` con subconsulta **por cada par del grupo**, y el número de
-pares crece con el tamaño del grupo: uno de 3 necesita 3 comprobaciones, uno de 5 necesita
-10. **La consulta SQL hay que reescribirla cada vez que cambia el tamaño del grupo.** La de
-Cypher no.
 
 ### 2.2 Recorridos de profundidad variable
 
-La cadena de confianza que justifica una recomendación es un recorrido:
-
-```
-tú → tu colonia → vecinos → sus perros → paseadores que los pasearon → calificaciones
-```
-
-En SQL **cada salto es un JOIN escrito a mano** y la profundidad queda fija al escribir la
-consulta. En Cypher es un parámetro:
+Para recomendar un paseador, el sistema pregunta a la red de vecinos del dueño. En SQL
+**cada salto es un JOIN escrito a mano** y la profundidad queda fija. En Cypher es un número:
 
 ```cypher
-MATCH (yo:Owner)-[:LIVES_IN|OWNS|JOINED|PERFORMED*1..3]-(w:Walker)
+MATCH (yo)-[:LIVES_IN|REFERRED*1..3]-(vecino:Owner)
 ```
 
-Ese `*1..3` es la diferencia.
+Con 1 salto llega a quien te refirió; con 2, a quien vive en tu colonia; con 3, a la colonia
+de quien te refirió.
 
 ### 2.3 El camino es la explicación
 
-Cuando un dueño pregunta *"¿por qué me recomiendas a esta persona?"*, la respuesta no es un
-número de similitud. Es **el camino**:
+Cuando un dueño pregunta *"¿por qué me recomiendas a esta persona?"*, la respuesta es un
+camino, obtenido con `shortestPath()` y devuelto tal cual:
 
 ```
-Tú → vives en García Ginerés → Carlos también → Carlos tiene a Nina
-   → a Nina la pasea Ana → Carlos calificó a Ana con 5
+Raul Kantun --[REFERRED]-- Arturo Kumul --[RATED 5/5]-- Gabriela Sansores
 ```
 
-Ese camino existe como dato consultable: se obtiene con `shortestPath()` y se muestra al
-usuario tal cual. En un modelo relacional habría que reconstruir la justificación por fuera,
-en código de aplicación.
+*"Arturo, el vecino que te refirió, le puso 5 estrellas."* En un modelo relacional no
+existe un tipo de dato "camino": la justificación se reconstruye en código.
 
 ### 2.4 Dónde **no** conviene el grafo
 
-Parte del valor de esta decisión está en reconocer sus límites:
-
 | Problema | Dónde pertenece realmente |
 |---|---|
-| Reservas, pagos, facturación | **Relacional** — importa la integridad y la auditoría |
-| Ubicación del perro en tiempo real | **Series de tiempo** — es un flujo de puntos, no una red |
+| Reservas, pagos, facturación | **Relacional**: importan la integridad y la auditoría |
+| Ubicación del perro en tiempo real | **Series de tiempo**: es un flujo de puntos, no una red |
 | Fotos y documentos | Almacenamiento de objetos |
 
-Este grafo resuelve **emparejamiento, confianza y análisis**. Un sistema real usaría varios
-motores, y este sería uno de ellos.
+Este grafo resuelve **emparejamiento, confianza y análisis**.
 
 ---
 
 ## 3. Arquitectura
 
 ```
-┌──────────────────────────────────────────────┐
-│  Cliente  (demo web · app móvil Flutter)     │
+┌──────────────────────────┐   ┌──────────────────────────┐
+│  scripts/  (terminal)    │   │  cliente/  (gráfico)     │
+│  crud.py                 │   │  app.py    Streamlit     │
+│  probar_consultas.py     │   │  dibujo.py d3 en iframe  │
+│  seed.py                 │   │                          │
+└────────────┬─────────────┘   └─────────────┬────────────┘
+             └──────────────┬────────────────┘
+                            │ llamadas a funciones Python
+┌───────────────────────────▼──────────────────┐
+│  backend/core/   Python puro                 │
+│   conexion.py  driver, credenciales, reintentos
+│   crud.py      altas, bajas y cambios        │
+│   consultas.py las 5 consultas especializadas│
+│   grafo.py     subgrafos para dibujar        │
 └──────────────────┬───────────────────────────┘
-                   │ HTTP / JSON
+                   │ driver oficial neo4j · neo4j+s (TLS)
 ┌──────────────────▼───────────────────────────┐
-│  backend/   Django 5 + Django REST Framework │
-│             capa HTTP, SIN ORM relacional    │
-│  ┌────────────────────────────────────────┐  │
-│  │  core/   driver oficial de neo4j       │  │
-│  │          toda la lógica y las consultas│  │
-│  └────────────────────┬───────────────────┘  │
-└───────────────────────┼──────────────────────┘
-                        │ bolt+s  (TLS)
-┌───────────────────────▼──────────────────────┐
-│          Neo4j AuraDB  —  nube               │
+│        Neo4j AuraDB Free  —  nube            │
 └──────────────────────────────────────────────┘
 ```
 
-### 3.1 Django corre con el ORM deshabilitado
+**`core/` no sabe que existe una interfaz.** Las dependencias apuntan en una sola dirección
+(`scripts → core → neo4j` y `cliente → core → neo4j`). Prueba de ello: hay **dos clientes**
+sobre el mismo núcleo, uno de terminal y uno gráfico, y ninguno contiene Cypher propio de
+negocio. Una API web o la app móvil se conectarían a `core/` de la misma forma.
 
-```python
-DATABASES = {}
-```
+### 3.1 Dos clientes
 
-No es un descuido: es la decisión de diseño más deliberada del proyecto.
+| Cliente | Para qué sirve |
+|---|---|
+| **Terminal** (`scripts/`) | Operación directa: menú CRUD y ejecución de las 5 consultas con su salida en texto |
+| **Gráfico** (`cliente/app.py`) | Visualización: dibuja los nodos y relaciones que devuelve cada consulta |
 
-**La única persistencia del sistema es Neo4j.** Django aporta exclusivamente la capa HTTP
-—ruteo, serialización, manejo de errores— y no almacena nada. Dejar el ORM activo
-habilitaría dos fuentes de verdad, que es precisamente el problema que este diseño evita.
+La interfaz gráfica existe porque un grafo es difícil de comprender sin verlo. Tiene tres
+secciones:
 
-### 3.2 `core/` no sabe que existe una web
+1. **Exploración por profundidad:** se elige un nodo y una profundidad (1 a 4 saltos) y se
+   dibuja el vecindario, con el número de nodos alcanzados en cada nivel.
+2. **Las 5 consultas:** cada resultado se muestra en tabla **y** como el subgrafo de caminos
+   que lo justifican (por ejemplo, la cadena de confianza completa o los paseos que comparten
+   los perros de un grupo).
+3. **CRUD con formularios:** después de crear o modificar un nodo se dibuja cómo quedó
+   conectado en la base.
 
-El paquete `core/` es Python puro con el driver `neo4j`. **No importa Django.** Las
-dependencias apuntan en una sola dirección:
+**Cómo se construyó.** `core/grafo.py` ejecuta consultas que devuelven caminos y los convierte
+con `Result.graph()` del driver oficial, que reúne todos los nodos y relaciones del resultado
+en un solo objeto. `cliente/dibujo.py` dibuja ese subgrafo con d3 (layout de fuerzas) dentro de
+un `st.iframe`. El zoom es **semántico**: al acercar, los nodos se separan y el texto, los nodos
+y las líneas conservan su tamaño, de modo que acercarse permite leer las zonas densas.
 
-```
-cliente  →  api  →  core  →  neo4j
-```
+### 3.2 Conexión estable
 
-Así la lógica se prueba sin levantar servidores, y cambiar de interfaz no toca el núcleo.
-
-`core/conexion.py` es el único módulo que construye un driver: es un singleton (el driver
-administra su propio pool y es caro de crear) y verifica la conexión con
-`verify_connectivity()`, porque `GraphDatabase.driver()` **no contacta al servidor** —solo
-guarda la configuración— y un fallo de credenciales pasaría desapercibido hasta la primera
-consulta.
+- `conexion.py` es el **único** módulo que crea un driver. Es un singleton: el driver
+  administra su propio pool de conexiones y es caro de crear.
+- Todas las consultas pasan por `leer()` y `escribir()`, que usan `driver.execute_query()`.
+  Esa función corre la consulta en una **transacción administrada que reintenta sola** hasta
+  30 segundos ante `ServiceUnavailable` y `SessionExpired`. Desde algunas redes el saludo TLS
+  con Aura se corta a medias (`SSL UNEXPECTED_EOF`); con el reintento, el programa sigue.
+- Las credenciales viajan solo por variables de entorno (`.env`, excluido del repositorio).
+  El programa falla al arrancar si falta alguna, diciendo cuál.
 
 ### 3.3 Estructura
 
@@ -180,18 +202,19 @@ dogtrips-graph/
 ├── pyproject.toml          dependencias (gestionado con uv)
 ├── uv.lock                 versiones exactas
 ├── .env.example            molde de las credenciales
-│
-├── backend/
-│   ├── config/             proyecto Django: settings, urls
-│   ├── api/                app DRF: views, serializers, urls
-│   └── core/               ← driver, consultas, lógica de dominio
-│       └── conexion.py
-│
-├── scripts/
-│   ├── probar_conexion.py  diagnóstico de conectividad
-│   └── seed.py             generación de datos sintéticos
-│
-└── docs/                   documentación técnica y diagramas
+├── backend/core/
+│   ├── conexion.py         driver, credenciales, leer(), leer_grafo() y escribir()
+│   ├── crud.py             CRUD de Owner, Dog y Walker
+│   ├── consultas.py        las 5 consultas especializadas
+│   └── grafo.py            subgrafos que explican cada consulta, para dibujar
+├── cliente/
+│   ├── app.py              interfaz gráfica (Streamlit)
+│   └── dibujo.py           dibujo del grafo con d3 y zoom semántico
+└── scripts/
+    ├── seed.py             crea el grafo con datos sintéticos de Mérida
+    ├── crud.py             menú interactivo del CRUD
+    ├── probar_consultas.py corre las 5 consultas (guion de la demo)
+    └── probar_conexion.py  diagnóstico de conectividad
 ```
 
 ---
@@ -202,24 +225,21 @@ dogtrips-graph/
               ┌──────┐  LIVES_IN   ┌──────┐   SERVES   ┌────────┐
               │ Owner│────────────►│ Zone │◄───────────│ Walker │
               └──┬───┘             └──────┘            └───┬────┘
-                 │                                         │
-                 │ OWNS                     RATED {score}  │
-                 │        ┌────────────────────────────────┘
-                 ▼        ▼                                │ HAS_SKILL
+                 │ OWNS                     RATED {score}  │ HAS_SKILL
+                 ▼        ◄────────────────────────────────┤
               ┌─────┐                                      ▼
               │ Dog │                                  ┌───────┐
               └──┬──┘                                  │ Skill │
         HAS_TRAIT│  │ JOINED                           └───┬───┘
-                 │  │                                      │ QUALIFIES_FOR
-                 ▼  ▼                                      │
+                 ▼  ▼                                      │ QUALIFIES_FOR
           ┌───────┐ ┌──────┐   PERFORMED                   │
-          │ Trait │ │ Walk │◄──────────────── Walker       │
+          │ Trait │ │ Walk │◄─────────────── Walker        │
           └───▲───┘ └──────┘                               │
-              └───────────────────────────────────────────-┘
+              └────────────────────────────────────────────┘
 
-      Dog ──CONFLICTED_WITH {reason}── Dog     (incidente registrado)
-    Owner ──REFERRED──► Owner                  (red de referidos)
-   Walker ──MENTORED_BY──► Walker              (progresión del paseador)
+      Dog ──CONFLICTED_WITH {reason, date}── Dog   (incidente registrado)
+    Owner ──REFERRED──► Owner                      (red de referidos)
+   Walker ──MENTORED_BY──► Walker                  (progresión del paseador)
 ```
 
 ### 4.1 Nodos
@@ -229,71 +249,62 @@ dogtrips-graph/
 | `:Owner` | `id`, `name`, `phone` | El dueño |
 | `:Dog` | `id`, `name`, `breed`, `sizeCategory`, `weightKg`, `ageMonths`, `energyLevel` | El perro |
 | `:Walker` | `id`, `name`, `experienceMonths`, `strengthLevel`, `verified`, `ratingAvg` | El paseador |
-| `:Trait` | `name`, `category` | Rasgo del perro: sociable, reactivo, tímido |
+| `:Trait` | `name`, `category` | Rasgo del perro: social, temperamento o manejo |
 | `:Skill` | `name` | Habilidad acreditada del paseador |
-| `:Zone` | `name` | Colonia |
+| `:Zone` | `name` | Colonia de Mérida |
 | `:Walk` | `id`, `date`, `durationMin`, `distanceKm`, `type`, `rating` | El paseo ocurrido |
 
-### 4.2 Relaciones
+Restricciones de unicidad sobre `id` (Owner, Dog, Walker, Walk) y `name` (Zone, Trait, Skill).
 
-```cypher
-(:Owner)  -[:OWNS]->                         (:Dog)
-(:Owner)  -[:LIVES_IN]->                     (:Zone)
-(:Walker) -[:SERVES]->                       (:Zone)
-(:Dog)    -[:HAS_TRAIT]->                    (:Trait)
-(:Walker) -[:HAS_SKILL]->                    (:Skill)
-(:Skill)  -[:QUALIFIES_FOR]->                (:Trait)
-(:Walker) -[:PERFORMED]->                    (:Walk)
-(:Dog)    -[:JOINED]->                       (:Walk)
-(:Owner)  -[:RATED {score, date}]->          (:Walker)
-(:Dog)    -[:CONFLICTED_WITH {reason, date}]-(:Dog)
-(:Owner)  -[:REFERRED]->                     (:Owner)
-(:Walker) -[:MENTORED_BY]->                  (:Walker)
-```
+### 4.2 Decisiones de modelado
 
-### 4.3 Las dos decisiones que sostienen el modelo
-
-**`:Walk` es un nodo, no una relación.** Un paseo individual podría ser una relación. Pero
-**un paseo grupal conecta varios perros con un paseador**, y una relación en Neo4j solo une
-dos nodos. Convertir el paseo en nodo propio permite que N perros apunten al mismo paseo —
-y ese nodo se vuelve el punto de unión para inferir compatibilidad.
-
-**La compatibilidad se infiere, no se almacena.** Deliberadamente **no existe** una relación
-`[:COMPATIBLE_WITH]`:
-
-```cypher
-(a)-[:JOINED]->(w:Walk)<-[:JOINED]-(b)  WHERE w.rating >= 4
-  AND NOT (a)-[:CONFLICTED_WITH]-(b)
-```
-
-Almacenarla sería guardar un dato derivado, que se desincroniza en cuanto ocurre un paseo
-nuevo. El grafo la calcula al recorrer, siempre actualizada. `:CONFLICTED_WITH` sí se
-almacena, porque un incidente es un **hecho observado**, no algo derivable.
+- **`:Walk` es un nodo, no una relación.** Un paseo grupal une a varios perros con un
+  paseador, y una relación solo une dos nodos. El nodo es además el punto de encuentro
+  del que se infiere la compatibilidad.
+- **La compatibilidad se infiere, no se almacena.** No existe `[:COMPATIBLE_WITH]`:
+  sería un dato derivado que se desincroniza con cada paseo nuevo.
+- **`:CONFLICTED_WITH` sí se almacena**, porque un incidente es un hecho observado.
+- **Los rasgos y habilidades son nodos**, para poder recorrerlos: dos perros que comparten
+  un rasgo quedan a dos saltos, y `(:Skill)-[:QUALIFIES_FOR]->(:Trait)` traduce entre el
+  vocabulario del paseador y el del perro dentro del grafo.
+- **`ratingAvg` es nulo, no 0, si nadie ha calificado al paseador.** Un paseador nuevo no
+  es un paseador malo.
 
 ---
 
 ## 5. Catálogo de consultas
 
-🚧 *Diseñadas; la implementación está en curso. Esta sección se completa con el Cypher
-verificado y su salida real conforme se prueban contra la nube.*
+Código completo en [`backend/core/consultas.py`](backend/core/consultas.py). Resultados reales
+con el perro de la demo, **Toby** (`dog-045`: Juguetón, Reactivo, Fuerte).
 
-| # | Consulta | Qué demuestra del paradigma |
-|---|---|---|
-| 1 | Recomendación de paseador a 3 saltos, vía vecinos y perros similares | Profundidad variable |
-| 2 | **Armado de grupo compatible para un paseo grupal** | Clique — el argumento central |
-| 3 | Camino más corto dueño ↔ paseador: la cadena de confianza | El camino es la explicación |
-| 4 | Paseadores acreditados para un perro difícil, con puntaje | Agregación sobre recorridos |
-| 5 | Combinaciones de rasgos que producen paseos mal calificados | Insight accionable |
+| # | Consulta | Qué demuestra | Resultado real |
+|---|---|---|---|
+| 1 | Recomendación de paseador vía la red de vecinos (`*1..3`) y perros parecidos | Profundidad variable | Gabriela Sansores: 4 perros de vecinos, 3 parecidos a Toby, 4.42★ |
+| 2 | **Armado de grupo compatible (clique)** con tamaño como parámetro | El argumento central | De 3: Toby + Bruno + Pancho (y 2 más). De 4: Toby + Bruno + Pancho + Ruco. Bacab descartado por incidente |
+| 3 | Camino más corto dueño ↔ paseador | El camino es la explicación | Raul → REFERRED → Arturo → RATED 5/5 → Gabriela |
+| 4 | Paseadores acreditados para un perro difícil | Agregación sobre recorridos | Irene Castillo cubre Reactivo y Fuerte, en su zona |
+| 5 | Combinaciones de rasgos que producen paseos mal calificados | Análisis sobre todo el grafo | Dominante + Reactivo: 27 de 42 paseos salen mal (lift 1.72) |
 
-**Trabajo futuro:** tarifa dinámica por peso y distancia · planes recurrentes · módulo de
-cuidadores · directorio de veterinarias.
+La consulta 5 redescubre una regla que `seed.py` sembró a propósito en los datos. Eso
+demuestra que la consulta encuentra patrones reales y no ruido.
+
+### CRUD
+
+`backend/core/crud.py` implementa crear, leer, actualizar y borrar para `:Owner`, `:Dog` y
+`:Walker`. Crear un perro crea el nodo **y** sus relaciones (`OWNS`, `HAS_TRAIT`) en una sola
+consulta. Las listas (rasgos, zonas, habilidades) se validan contra el catálogo **antes** de
+escribir. Borrar un dueño borra también a sus perros (`DETACH DELETE`); los paseos se
+conservan como historia.
+
+**Trabajo futuro:** API REST con Django · app móvil del paseador que registre paseos, incidentes
+y los rasgos que observa en el primer paseo · tarifa dinámica por peso y distancia.
 
 ---
 
 ## 6. Puesta en marcha
 
 **Requisitos:** Python 3.13+ · [`uv`](https://docs.astral.sh/uv/) · una instancia de Neo4j
-AuraDB (la capa gratuita alcanza).
+AuraDB (la capa gratuita alcanza; incluye APOC, que usa la consulta 2).
 
 ```bash
 git clone https://github.com/tomas-altamiranot/dogtrips-graph.git
@@ -301,12 +312,9 @@ cd dogtrips-graph
 uv sync
 ```
 
-`uv sync` lee `uv.lock` y reconstruye el entorno con las versiones exactas del desarrollo.
-
 ### Credenciales
 
-Las credenciales **no están en el repositorio** y nunca deben estarlo. Copia el molde y
-rellénalo con tu propia instancia:
+Las credenciales **no están en el repositorio**. Copia el molde y rellénalo con tu instancia:
 
 ```bash
 cp .env.example .env
@@ -319,34 +327,24 @@ NEO4J_PASSWORD=tu_password_de_aura
 NEO4J_DATABASE=
 ```
 
-> `NEO4J_DATABASE` puede quedar **vacío**. En AuraDB la base suele llamarse como el id de la
-> instancia y no `neo4j`; vacío usa la base por omisión del usuario.
+> `NEO4J_DATABASE` puede quedar **vacío**: en AuraDB la base suele llamarse como el id de la
+> instancia; vacío usa la base por omisión del usuario.
 
-`core/conexion.py` falla al arrancar si falta alguna variable, diciendo cuál.
-
-### Verificar
+### Ejecutar
 
 ```bash
-uv run python scripts/probar_conexion.py
+uv run python scripts/probar_conexion.py   # 1. verifica la conexión
+uv run python scripts/seed.py              # 2. carga los datos (borra y recrea el grafo)
+uv run python scripts/probar_consultas.py  # 3. corre las 5 consultas (terminal)
+uv run python scripts/crud.py              # 4. menú del CRUD (terminal)
+uv run streamlit run cliente/app.py        # 5. interfaz gráfica (abre el navegador)
 ```
 
-```
-Conexion establecida con neo4j+s://XXXXXXXX.databases.neo4j.io
-  nodos        : 0
-  relaciones   : 0
-  etiquetas    : (ninguna)
-```
+El seed usa una semilla fija: el grafo sale idéntico cada vez y las consultas devuelven
+siempre los mismos resultados.
 
-Si falla, el mensaje indica si el problema son las credenciales o la instancia. **AuraDB
-Free suspende las instancias inactivas** tras varios días: si no alcanza el servidor, revisa
-que esté despierta en la consola de Aura.
-
-### 🚧 Aún no disponibles
-
-```bash
-uv run python scripts/seed.py           # cargar datos sintéticos
-uv run python backend/manage.py runserver
-```
+**AuraDB Free suspende las instancias inactivas** tras varios días. Si no alcanza el servidor,
+revisa que esté despierta en la consola de Aura.
 
 ---
 
