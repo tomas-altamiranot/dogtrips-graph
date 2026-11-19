@@ -101,7 +101,9 @@ def confirmar(texto: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def menu_duenos(cat: dict) -> None:
-    accion = pedir_opcion("Duenos", ["Listar", "Ver uno", "Crear", "Actualizar", "Borrar"])
+    accion = pedir_opcion("Duenos", ["Listar", "Ver uno", "Crear", "Actualizar", "Borrar", "Regresar"])
+    if accion == "Regresar":
+        return
     if accion == "Listar":
         tabla(crud.listar_duenos())
     elif accion == "Ver uno":
@@ -126,7 +128,9 @@ def menu_duenos(cat: dict) -> None:
 
 
 def menu_perros(cat: dict) -> None:
-    accion = pedir_opcion("Perros", ["Listar", "Ver uno", "Crear", "Actualizar", "Borrar"])
+    accion = pedir_opcion("Perros", ["Listar", "Ver uno", "Crear", "Actualizar", "Borrar", "Regresar"])
+    if accion == "Regresar":
+        return
     if accion == "Listar":
         tabla(crud.listar_perros())
     elif accion == "Ver uno":
@@ -165,7 +169,9 @@ def menu_perros(cat: dict) -> None:
 
 
 def menu_paseadores(cat: dict) -> None:
-    accion = pedir_opcion("Paseadores", ["Listar", "Ver uno", "Crear", "Actualizar", "Borrar"])
+    accion = pedir_opcion("Paseadores", ["Listar", "Ver uno", "Crear", "Actualizar", "Borrar", "Regresar"])
+    if accion == "Regresar":
+        return
     if accion == "Listar":
         tabla(crud.listar_paseadores())
     elif accion == "Ver uno":

@@ -38,13 +38,16 @@ def main() -> None:
     if not filas:
         print("   (vacio)")
 
-    titulo(2, f"Grupos de tres compatibles con {NOMBRE}  [LA ESTRELLA]")
-    grupos = q.armar_grupo(PERRO)
-    for g in grupos:
-        print(f"   {g['base']} + {g['companero1']} + {g['companero2']}")
-        print(f"        tamanos={g['tamanos']}  energias={g['energias']}")
-    if not grupos:
-        print("   (vacio)")
+    titulo(2, f"Grupos compatibles con {NOMBRE}  [LA ESTRELLA]")
+    # La MISMA consulta para grupos de 3 y de 4: el tamano es un parametro.
+    for tamano in (3, 4):
+        grupos = q.armar_grupo(PERRO, tamano=tamano)
+        print(f"\n   Grupos de {tamano}:")
+        for g in grupos:
+            print(f"   {g['base']} + {' + '.join(g['companeros'])}")
+            print(f"        tamanos={g['tamanos']}  energias={g['energias']}")
+        if not grupos:
+            print("   (ninguno)")
 
     malos = q.descartados(PERRO)
     if malos:

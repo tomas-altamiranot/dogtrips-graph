@@ -72,31 +72,41 @@ def recomendar_paseadores(
 # coincidido en un paseo bien calificado, y se descarta si hay un incidente.
 #
 # Contra SQL: cada par necesita su propio NOT EXISTS, y el numero de pares crece
-# con el tamano del grupo (3 perros -> 3 pares, 5 perros -> 10). La consulta SQL
+# con el tamano del grupo (3 perros -> 3 pares, 4 -> 6, 5 -> 10). La consulta SQL
 # hay que reescribirla cada vez que cambia el tamano del grupo.
+#
+# Aqui el tamano es un PARAMETRO ($tamano). La consulta tiene tres pasos:
+#   1. candidatos: perros compatibles con el perro base
+#   2. apoc.coll.combinations: todas las formas de elegir ($tamano - 1) de ellos
+#   3. ALL(x ... ALL(y ...)): de esas combinaciones, quedarse solo con las que
+#      tienen TODOS los pares compatibles entre si. Esa doble condicion "todos
+#      con todos" es literalmente la definicion de clique, y no cambia si el
+#      grupo es de 3 o de 6.
+#
+# La regla de compatibilidad se escribe UNA vez y se aplica a cada par:
+#   coincidieron en un paseo con rating >= $minimo  Y  no hay incidente.
 
 Q_GRUPO = """
-// A y B, cada uno compatible con el perro base
-MATCH (base:Dog {id: $perro})-[:JOINED]->(w1:Walk)<-[:JOINED]-(a:Dog)
-WHERE w1.rating >= $minimo AND NOT (base)-[:CONFLICTED_WITH]-(a)
+// 1. Candidatos: perros compatibles con el perro base
+MATCH (base:Dog {id: $perro})-[:JOINED]->(w:Walk)<-[:JOINED]-(c:Dog)
+WHERE w.rating >= $minimo AND NOT (base)-[:CONFLICTED_WITH]-(c)
+WITH base, collect(DISTINCT c) AS candidatos
 
-MATCH (base)-[:JOINED]->(w2:Walk)<-[:JOINED]-(b:Dog)
-WHERE w2.rating >= $minimo AND NOT (base)-[:CONFLICTED_WITH]-(b)
-  AND elementId(a) < elementId(b)          // evita contar el mismo par dos veces
+// 2. Cada combinacion posible de companeros
+UNWIND apoc.coll.combinations(candidatos, $tamano - 1) AS grupo
 
-  // el tercer lado del triangulo: A y B tambien tienen que llevarse entre ellos
-  AND NOT (a)-[:CONFLICTED_WITH]-(b)
-  AND EXISTS { (a)-[:JOINED]->(w3:Walk)<-[:JOINED]-(b) WHERE w3.rating >= $minimo }
+// 3. Clique: todos los pares del grupo tambien son compatibles entre si
+WITH base, grupo
+WHERE ALL(x IN grupo WHERE ALL(y IN grupo WHERE
+        elementId(x) >= elementId(y)          // cada par se revisa una sola vez
+        OR (NOT (x)-[:CONFLICTED_WITH]-(y)
+            AND EXISTS { (x)-[:JOINED]->(k:Walk)<-[:JOINED]-(y) WHERE k.rating >= $minimo })))
 
-// DISTINCT es imprescindible: un mismo par de perros puede haber coincidido en
-// varios paseos, y sin el sale una fila por cada combinacion de paseos.
-RETURN DISTINCT
-       base.name AS base,
-       a.name    AS companero1,
-       b.name    AS companero2,
-       [base.sizeCategory, a.sizeCategory, b.sizeCategory] AS tamanos,
-       [base.energyLevel, a.energyLevel, b.energyLevel]    AS energias
-ORDER BY companero1, companero2
+RETURN base.name                                       AS base,
+       [d IN grupo | d.name]                           AS companeros,
+       [base.sizeCategory] + [d IN grupo | d.sizeCategory] AS tamanos,
+       [base.energyLevel]  + [d IN grupo | d.energyLevel]  AS energias
+ORDER BY companeros
 LIMIT $limite
 """
 
@@ -107,9 +117,9 @@ RETURN otro.name AS perro, c.reason AS motivo, toString(c.date) AS fecha
 """
 
 
-def armar_grupo(perro: str, minimo: int = 4, limite: int = 10) -> list[dict]:
-    """Tercias donde las tres parejas son compatibles entre si."""
-    return leer(Q_GRUPO, perro=perro, minimo=minimo, limite=limite)
+def armar_grupo(perro: str, tamano: int = 3, minimo: int = 4, limite: int = 10) -> list[dict]:
+    """Grupos de `tamano` perros (incluido este) donde todos se llevan con todos."""
+    return leer(Q_GRUPO, perro=perro, tamano=tamano, minimo=minimo, limite=limite)
 
 
 def descartados(perro: str) -> list[dict]:
