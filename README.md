@@ -12,11 +12,6 @@ El sistema responde tres preguntas que una base relacional contesta con dificult
 **Bases de Datos Avanzadas — Universidad Anáhuac Mayab**
 Proyecto individual · Neo4j AuraDB · Django REST Framework
 
-> DogTrips nació en 5.º semestre como documento de requerimientos para Ingeniería de
-> Software, y en 6.º se construyó como aplicación web sobre Express y MongoDB. Este
-> repositorio es su tercera vida: el mismo dominio modelado como grafo, para resolver las
-> preguntas que las versiones anteriores no podían contestar.
-
 ---
 
 ## Estado
