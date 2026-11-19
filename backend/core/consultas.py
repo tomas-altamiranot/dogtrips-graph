@@ -9,38 +9,56 @@ corrido, sin el ruido de Python alrededor.
 
 from __future__ import annotations
 
-from .conexion import sesion
+from .conexion import leer
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 1. Recomendacion de paseador por perros parecidos
+# 1. Recomendacion de paseador via vecinos y perros parecidos
 # ═════════════════════════════════════════════════════════════════════════════
-# Recorrido de cuatro saltos:
-#   mi perro -> sus rasgos -> otros perros con esos rasgos -> sus paseos -> paseador
+# Recorrido:
+#   mi perro -> mi dueno -> [red de vecinos, 1 a 3 saltos] -> sus perros
+#            -> sus paseos bien calificados -> paseador
 #
-# Lo que demuestra: un ranking por calificacion promedio ordena a los paseadores
-# en abstracto. Este los ordena por desempeno CON PERROS COMO EL MIO, que es una
-# pregunta distinta y mas util.
+# La "red de vecinos" se recorre con PROFUNDIDAD VARIABLE: *1..3 sobre
+# LIVES_IN y REFERRED. Con un salto llega a quien me refirio; con dos, a quien
+# vive en mi colonia o a quien refirio a mi referente; con tres, a la colonia de
+# mi referente. En SQL cada uno de esos casos seria un JOIN distinto escrito a
+# mano; aqui es un solo patron y la profundidad es un numero.
+#
+# Despues se pondera: un paseador que ya paseo bien a perros de mis vecinos
+# QUE ADEMAS se parecen al mio (comparten un rasgo) sube en el ranking. Un
+# promedio general ordena a los paseadores en abstracto; este los ordena por
+# desempeno con perros como el mio, de gente que conozco.
 
 Q_RECOMENDAR = """
-MATCH (p:Dog {id: $perro})-[:HAS_TRAIT]->(t:Trait)<-[:HAS_TRAIT]-(similar:Dog)
-WHERE similar <> p
-MATCH (similar)-[:JOINED]->(k:Walk)<-[:PERFORMED]-(w:Walker)
-WHERE k.rating >= $minimo
-RETURN w.id                    AS id,
-       w.name                  AS paseador,
-       count(DISTINCT similar) AS perrosParecidos,
-       round(avg(k.rating), 2) AS calificacionConParecidos,
-       w.ratingAvg             AS promedioGeneral,
-       w.verified              AS verificado
-ORDER BY perrosParecidos DESC, calificacionConParecidos DESC
+MATCH (p:Dog {id: $perro})<-[:OWNS]-(yo:Owner)
+MATCH (yo)-[:LIVES_IN|REFERRED*1..$saltos]-(vecino:Owner)
+WHERE vecino <> yo
+WITH DISTINCT p, vecino
+MATCH (vecino)-[:OWNS]->(suyo:Dog)-[:JOINED]->(k:Walk)<-[:PERFORMED]-(w:Walker)
+WHERE k.rating >= $minimo AND suyo <> p
+WITH w, suyo, k,
+     EXISTS { (p)-[:HAS_TRAIT]->(:Trait)<-[:HAS_TRAIT]-(suyo) } AS seParece
+RETURN w.id                                          AS id,
+       w.name                                        AS paseador,
+       count(DISTINCT suyo)                          AS perrosDeVecinos,
+       count(DISTINCT CASE WHEN seParece THEN suyo END) AS parecidosAlMio,
+       round(avg(k.rating), 2)                       AS calificacionConVecinos,
+       w.ratingAvg                                   AS promedioGeneral,
+       w.verified                                    AS verificado
+ORDER BY parecidosAlMio DESC, perrosDeVecinos DESC, calificacionConVecinos DESC
 LIMIT $limite
 """
 
 
-def recomendar_paseadores(perro: str, minimo: int = 4, limite: int = 5) -> list[dict]:
-    """Paseadores con buen historial en perros que comparten rasgos con este."""
-    with sesion() as s:
-        return [r.data() for r in s.run(Q_RECOMENDAR, perro=perro, minimo=minimo, limite=limite)]
+def recomendar_paseadores(
+    perro: str, saltos: int = 3, minimo: int = 4, limite: int = 5
+) -> list[dict]:
+    """Paseadores que ya pasearon bien a perros de la red de vecinos del dueno."""
+    # Neo4j no acepta parametros dentro de *1..N, asi que el limite se interpola.
+    # Es un entero controlado por el codigo (int() lo garantiza), nunca texto
+    # del usuario, por lo que no abre la puerta a inyeccion de Cypher.
+    consulta = Q_RECOMENDAR.replace("$saltos", str(int(saltos)))
+    return leer(consulta, perro=perro, minimo=minimo, limite=limite)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -91,14 +109,12 @@ RETURN otro.name AS perro, c.reason AS motivo, toString(c.date) AS fecha
 
 def armar_grupo(perro: str, minimo: int = 4, limite: int = 10) -> list[dict]:
     """Tercias donde las tres parejas son compatibles entre si."""
-    with sesion() as s:
-        return [r.data() for r in s.run(Q_GRUPO, perro=perro, minimo=minimo, limite=limite)]
+    return leer(Q_GRUPO, perro=perro, minimo=minimo, limite=limite)
 
 
 def descartados(perro: str) -> list[dict]:
     """Perros con los que este no puede salir, con el motivo registrado."""
-    with sesion() as s:
-        return [r.data() for r in s.run(Q_GRUPO_DESCARTADOS, perro=perro)]
+    return leer(Q_GRUPO_DESCARTADOS, perro=perro)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -111,17 +127,23 @@ def descartados(perro: str) -> list[dict]:
 # En un modelo relacional no existe un tipo de dato "camino": habria que
 # reconstruir la justificacion en el codigo de la aplicacion.
 
-# Los tipos de relacion se restringen a proposito. Sin esa lista, shortestPath
-# encuentra atajos sin sentido como "los dos paseadores tienen la habilidad de
-# primeros auxilios", que es un camino valido en el grafo pero no es confianza.
-# Un camino solo explica si cada salto significa algo para el usuario.
+# Los tipos de relacion se restringen a proposito: solo saltos ENTRE PERSONAS y
+# lo que hicieron (refirio, califico, es dueno de, paseo). Se dejan fuera
+# LIVES_IN y SERVES porque producen atajos que no son confianza: "vives en
+# Montejo y el trabaja en Montejo" es un camino valido en el grafo, pero no
+# explica por que confiar en alguien. Lo mismo HAS_SKILL: "los dos tienen
+# primeros auxilios" no es una recomendacion. Un camino solo explica si cada
+# salto significa algo para el usuario.
 Q_CAMINO = """
 MATCH (o:Owner {id: $dueno}), (w:Walker {id: $paseador})
 MATCH ruta = shortestPath(
-    (o)-[:OWNS|JOINED|PERFORMED|RATED|LIVES_IN|SERVES|REFERRED*..$saltos]-(w)
+    (o)-[:OWNS|JOINED|PERFORMED|RATED|REFERRED*..$saltos]-(w)
 )
 RETURN [n IN nodes(ruta) | coalesce(n.name, n.id)] AS nodos,
-       [r IN relationships(ruta) | type(r)]        AS relaciones,
+       [r IN relationships(ruta) |
+            CASE WHEN type(r) = 'RATED'
+                 THEN 'RATED ' + toString(r.score) + '/5'
+                 ELSE type(r) END]                  AS relaciones,
        length(ruta)                                 AS saltos
 """
 
@@ -131,39 +153,44 @@ def cadena_de_confianza(dueno: str, paseador: str, saltos: int = 6) -> dict | No
     # El limite de saltos no admite parametro en el patron, asi que se
     # interpola; es un entero controlado por el codigo, nunca entrada del usuario.
     consulta = Q_CAMINO.replace("$saltos", str(int(saltos)))
-    with sesion() as s:
-        fila = s.run(consulta, dueno=dueno, paseador=paseador).single()
-        return fila.data() if fila else None
+    filas = leer(consulta, dueno=dueno, paseador=paseador)
+    return filas[0] if filas else None
 
 
 Q_PAR_PARA_EXPLICAR = """
-// Un dueno cuyo perro fue paseado por alguien a quien el dueno NO ha calificado.
-// Es el caso que da sentido a la consulta: "no conozco a esta persona, por que
-// deberia confiar en ella".
-MATCH (o:Owner)-[:OWNS]->(:Dog)-[:JOINED]->(:Walk)<-[:PERFORMED]-(w:Walker)
-WHERE NOT (o)-[:RATED]->(w)
+// Un dueno que NUNCA ha tratado con el paseador (no lo califico y ninguno de
+// sus perros salio con el), pero alguien de su red de referidos si lo califico
+// bien. Es el caso que da sentido a la consulta: "no conozco a esta persona,
+// por que deberia confiar en ella" -> "porque tu vecino, que te refirio, le
+// puso 5".
+MATCH (o:Owner)-[:REFERRED]-(:Owner)-[r:RATED]->(w:Walker)
+WHERE r.score >= 4
+  AND NOT (o)-[:RATED]->(w)
+  AND NOT EXISTS { (o)-[:OWNS]->(:Dog)-[:JOINED]->(:Walk)<-[:PERFORMED]-(w) }
 RETURN o.id AS dueno, o.name AS nombreDueno,
        w.id AS paseador, w.name AS nombrePaseador
+ORDER BY o.id, w.id
 LIMIT 1
 """
 
 
 def par_para_explicar() -> dict | None:
     """Encuentra un dueno y un paseador sin trato directo, para la consulta 3."""
-    with sesion() as s:
-        fila = s.run(Q_PAR_PARA_EXPLICAR).single()
-        return fila.data() if fila else None
+    filas = leer(Q_PAR_PARA_EXPLICAR)
+    return filas[0] if filas else None
 
 
 def explicar_camino(camino: dict) -> str:
     """Convierte el camino en una frase legible para la demo."""
     if not camino:
         return "No hay conexion entre ellos."
+    # El camino se recorre sin direccion, asi que se dibuja con guiones y sin
+    # flecha: "Ana --[REFERRED]-- Luis" no dice quien refirio a quien.
     partes = []
     for i, nodo in enumerate(camino["nodos"]):
         partes.append(nodo)
         if i < len(camino["relaciones"]):
-            partes.append(f" --[{camino['relaciones'][i]}]--> ")
+            partes.append(f" --[{camino['relaciones'][i]}]-- ")
     return "".join(partes)
 
 
@@ -187,6 +214,9 @@ MATCH (d:Dog {id: $perro})-[:HAS_TRAIT]->(t:Trait)
 MATCH (t)<-[:QUALIFIES_FOR]-(:Skill)<-[:HAS_SKILL]-(w:Walker)
 MATCH (d)<-[:OWNS]-(:Owner)-[:LIVES_IN]->(z:Zone)
 WITH w, z, collect(DISTINCT t.name) AS rasgos
+// Un paseador sin calificaciones tiene ratingAvg nulo, no 0: "nadie lo ha
+// calificado" y "lo calificaron con 0" son cosas distintas. Para ordenar se usa
+// coalesce(..., -1), que lo manda al final sin inventarle una nota.
 RETURN w.name             AS paseador,
        rasgos             AS rasgosQueCubre,
        size(rasgos)       AS cuantosCubre,
@@ -194,16 +224,16 @@ RETURN w.name             AS paseador,
        z.name             AS zonaDelPerro,
        w.experienceMonths AS mesesExperiencia,
        w.strengthLevel    AS fuerza,
-       w.ratingAvg        AS calificacion
-ORDER BY cubreZona DESC, cuantosCubre DESC, calificacion DESC
+       w.ratingAvg        AS calificacion,
+       COUNT { (:Owner)-[:RATED]->(w) } AS numCalificaciones
+ORDER BY cubreZona DESC, cuantosCubre DESC, coalesce(w.ratingAvg, -1) DESC
 LIMIT $limite
 """
 
 
 def acreditados_para(perro: str, limite: int = 5) -> list[dict]:
     """Paseadores de la zona del perro con habilidades para sus rasgos."""
-    with sesion() as s:
-        return [r.data() for r in s.run(Q_ACREDITADOS, perro=perro, limite=limite)]
+    return leer(Q_ACREDITADOS, perro=perro, limite=limite)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -219,17 +249,28 @@ def acreditados_para(perro: str, limite: int = 5) -> list[dict]:
 # mal, una combinacion al 58% es ruido. Por eso se calcula primero la media
 # global y se reporta el "lift": cuantas veces peor que el promedio es esta
 # combinacion. lift = 1.0 significa "igual que cualquier otro paseo".
+#
+# La unidad que se cuenta es el PASEO. Un mismo paseo puede tener la
+# combinacion Ansioso+Reactivo por varios pares de perros a la vez; contar filas
+# lo contaria varias veces e inflaria el total. Por eso, antes de agregar, se
+# reduce a una fila por (paseo, combinacion) con WITH DISTINCT. Asi "8/10"
+# significa literalmente "8 de 10 paseos grupales".
+#
+# r1.name <= r2.name ordena cada combinacion una sola vez (A+B, nunca B+A) y
+# deja pasar la combinacion de un rasgo consigo mismo entre DOS perros
+# distintos, por ejemplo dos perros reactivos en el mismo paseo.
 Q_COMBINACIONES = """
 MATCH (base:Walk {type: 'grupal'})
 WITH avg(CASE WHEN base.rating <= 3 THEN 1.0 ELSE 0.0 END) AS media
 
 MATCH (k:Walk {type: 'grupal'})<-[:JOINED]-(a:Dog)-[:HAS_TRAIT]->(r1:Trait)
 MATCH (k)<-[:JOINED]-(b:Dog)-[:HAS_TRAIT]->(r2:Trait)
-WHERE elementId(a) < elementId(b) AND r1.name < r2.name
-WITH media, r1.name AS rasgoA, r2.name AS rasgoB,
+WHERE a <> b AND r1.name <= r2.name
+WITH DISTINCT media, k, r1.name AS rasgoA, r2.name AS rasgoB
+WITH media, rasgoA, rasgoB,
      sum(CASE WHEN k.rating <= 3 THEN 1 ELSE 0 END) AS malos,
-     count(*)                                       AS total
-WHERE total >= $minimoCasos
+     count(k)                                       AS total
+WHERE total >= $minimoCasos AND media > 0
 RETURN rasgoA, rasgoB, malos, total,
        round(100.0 * malos / total, 1)        AS porcentajeMalos,
        round(100.0 * media, 1)                AS promedioGlobal,
@@ -239,10 +280,9 @@ LIMIT $limite
 """
 
 
-def combinaciones_problematicas(minimo_casos: int = 8, limite: int = 10) -> list[dict]:
+# minimo_casos = 15: con menos paseos, un 80% puede ser 8 de 10 por azar. Con
+# 15 o mas, la combinacion que encabeza la lista es Dominante + Reactivo, que es
+# justo una de las reglas sembradas en seed.py: la consulta la redescubre.
+def combinaciones_problematicas(minimo_casos: int = 15, limite: int = 10) -> list[dict]:
     """Pares de rasgos con mayor proporcion de paseos mal calificados."""
-    with sesion() as s:
-        return [
-            r.data()
-            for r in s.run(Q_COMBINACIONES, minimoCasos=minimo_casos, limite=limite)
-        ]
+    return leer(Q_COMBINACIONES, minimoCasos=minimo_casos, limite=limite)

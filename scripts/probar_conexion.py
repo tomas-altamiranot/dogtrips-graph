@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from core.conexion import ErrorDeConexion, cerrar, sesion, verificar_conexion
+from core.conexion import ErrorDeConexion, cerrar, leer, verificar_conexion
 
 
 def main() -> int:
@@ -20,10 +20,9 @@ def main() -> int:
 
     print(f"Conexion establecida con {uri}")
 
-    with sesion() as s:
-        nodos = s.run("MATCH (n) RETURN count(n) AS total").single()["total"]
-        rels = s.run("MATCH ()-[r]->() RETURN count(r) AS total").single()["total"]
-        etiquetas = s.run("CALL db.labels() YIELD label RETURN collect(label) AS l").single()["l"]
+    nodos = leer("MATCH (n) RETURN count(n) AS total")[0]["total"]
+    rels = leer("MATCH ()-[r]->() RETURN count(r) AS total")[0]["total"]
+    etiquetas = leer("CALL db.labels() YIELD label RETURN collect(label) AS l")[0]["l"]
 
     print(f"  nodos        : {nodos}")
     print(f"  relaciones   : {rels}")

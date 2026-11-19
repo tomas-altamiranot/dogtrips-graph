@@ -15,7 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from core import consultas as q  # noqa: E402
 from core.conexion import cerrar, verificar_conexion  # noqa: E402
 
-PERRO = "dog-009"  # Max: Dominante, Timido, Fuerte
+# Toby: Jugueton, Reactivo, Fuerte. Se eligio porque tiene un incidente
+# registrado (la parte de "descartados" no sale vacia) y forma grupos validos.
+PERRO = "dog-045"
+NOMBRE = "Toby"
 
 
 def titulo(n: int, texto: str) -> None:
@@ -25,16 +28,17 @@ def titulo(n: int, texto: str) -> None:
 def main() -> None:
     print(f"Conectado a {verificar_conexion()}")
 
-    titulo(1, "Paseadores recomendados para Max")
+    titulo(1, f"Paseadores recomendados para {NOMBRE} (red de vecinos, 1 a 3 saltos)")
     filas = q.recomendar_paseadores(PERRO)
     for f in filas:
-        print(f"   {f['paseador']:<22} parecidos={f['perrosParecidos']:<3} "
-              f"con_parecidos={f['calificacionConParecidos']:<5} "
-              f"general={f['promedioGeneral']}")
+        print(f"   {f['paseador']:<22} perros_de_vecinos={f['perrosDeVecinos']:<3} "
+              f"parecidos={f['parecidosAlMio']:<3} "
+              f"calif_con_vecinos={f['calificacionConVecinos']:<5} "
+              f"general={f['promedioGeneral'] if f['promedioGeneral'] is not None else 'sin calif.'}")
     if not filas:
         print("   (vacio)")
 
-    titulo(2, "Grupos de tres compatibles con Max  [LA ESTRELLA]")
+    titulo(2, f"Grupos de tres compatibles con {NOMBRE}  [LA ESTRELLA]")
     grupos = q.armar_grupo(PERRO)
     for g in grupos:
         print(f"   {g['base']} + {g['companero1']} + {g['companero2']}")
@@ -48,7 +52,7 @@ def main() -> None:
         for m in malos:
             print(f"      {m['perro']:<12} {m['motivo']}  ({m['fecha']})")
     else:
-        print("\n   Max no tiene incidentes registrados.")
+        print(f"\n   {NOMBRE} no tiene incidentes registrados.")
 
     titulo(3, "Cadena de confianza: dueno -> paseador")
     # Se busca un par real: un dueno cuyo perro fue paseado por alguien a quien
@@ -66,14 +70,16 @@ def main() -> None:
     else:
         print("   (no se encontro un par para explicar)")
 
-    titulo(4, "Paseadores acreditados para Max")
+    titulo(4, f"Paseadores acreditados para {NOMBRE}")
     acr = q.acreditados_para(PERRO)
     for a in acr:
         marca = "en su zona" if a["cubreZona"] else "fuera de zona"
+        calif = (f"{a['calificacion']} ({a['numCalificaciones']} calif.)"
+                 if a["calificacion"] is not None else "sin calificaciones")
         print(f"   {a['paseador']:<22} cubre {a['cuantosCubre']} rasgo(s): "
               f"{a['rasgosQueCubre']}")
         print(f"        fuerza={a['fuerza']} exp={a['mesesExperiencia']}m "
-              f"calif={a['calificacion']}  [{marca}: {a['zonaDelPerro']}]")
+              f"calif={calif}  [{marca}: {a['zonaDelPerro']}]")
     if not acr:
         print("   (vacio)")
 
@@ -84,7 +90,8 @@ def main() -> None:
               f"salen mal en promedio)\n")
     for c in combos:
         print(f"   {c['rasgoA']:<16} + {c['rasgoB']:<16} "
-              f"{c['porcentajeMalos']:>5}%  lift={c['lift']:<5} ({c['malos']}/{c['total']})")
+              f"{c['porcentajeMalos']:>5}%  lift={c['lift']:<5} "
+              f"({c['malos']} de {c['total']} paseos)")
     if not combos:
         print("   (vacio)")
 

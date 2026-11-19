@@ -188,7 +188,7 @@ def generar():
             "experienceMonths": random.randint(2, 72),
             "strengthLevel": random.choice(["media", "media", "alta"]),
             "verified": random.random() < 0.75,
-            "ratingAvg": 0.0,  # se calcula al final, con las calificaciones reales
+            "ratingAvg": None,  # se calcula al final, con las calificaciones reales
             "zonas": propias,
             "skills": random.sample(list(HABILIDADES), random.randint(1, 3)),
         })
@@ -296,9 +296,11 @@ def generar():
         })
 
     # Promedio real por paseador, para que ratingAvg no sea un numero inventado.
+    # Sin calificaciones queda en None (null en Neo4j), no en 0.0: un paseador
+    # nuevo no es un paseador malo, simplemente nadie lo ha calificado aun.
     for w in paseadores:
         suyas = [c["score"] for c in calificaciones if c["walkerId"] == w["id"]]
-        w["ratingAvg"] = round(sum(suyas) / len(suyas), 2) if suyas else 0.0
+        w["ratingAvg"] = round(sum(suyas) / len(suyas), 2) if suyas else None
 
     # ═════════════════════════════════════════════════════════════════════════
     # CONFLICTOS — dentro de las camadas, nunca fuera

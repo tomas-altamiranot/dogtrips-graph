@@ -7,13 +7,14 @@ pide sesiones aquí y nunca construye su propio driver.
 from __future__ import annotations
 
 import os
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
 import certifi
 from dotenv import load_dotenv
-from neo4j import Driver, GraphDatabase
-from neo4j.exceptions import AuthError, ServiceUnavailable
+from neo4j import Driver, GraphDatabase, RoutingControl
+from neo4j.exceptions import AuthError, ServiceUnavailable, SessionExpired
 
 # El .env vive en la raíz del repositorio, dos niveles arriba de este archivo.
 RAIZ = Path(__file__).resolve().parents[2]
@@ -103,18 +104,62 @@ def verificar_conexion() -> str:
         ErrorDeConexion: si el servidor no responde o las credenciales fallan.
     """
     uri, _, _, _ = _leer_config()
-    try:
-        obtener_driver().verify_connectivity()
-    except AuthError as exc:
-        raise ErrorDeConexion(
-            "Credenciales rechazadas por AuraDB. Revisa NEO4J_USERNAME y NEO4J_PASSWORD."
-        ) from exc
-    except ServiceUnavailable as exc:
-        raise ErrorDeConexion(
-            f"No se pudo alcanzar {uri}. Revisa la URI y que la instancia esté activa "
-            "(Aura Free suspende las instancias inactivas por varios días)."
-        ) from exc
-    return uri
+    # verify_connectivity() no reintenta por su cuenta. Como el saludo TLS con
+    # Aura a veces se corta a medias (ver leer()), se le dan unos intentos
+    # antes de declarar que la base no responde.
+    ultimo: Exception | None = None
+    for intento in range(_INTENTOS_VERIFICACION):
+        try:
+            obtener_driver().verify_connectivity()
+            return uri
+        except AuthError as exc:
+            raise ErrorDeConexion(
+                "Credenciales rechazadas por AuraDB. Revisa NEO4J_USERNAME y NEO4J_PASSWORD."
+            ) from exc
+        except (ServiceUnavailable, SessionExpired) as exc:
+            ultimo = exc
+            time.sleep(1 + intento)
+    raise ErrorDeConexion(
+        f"No se pudo alcanzar {uri}. Revisa la URI y que la instancia esté activa "
+        "(Aura Free suspende las instancias inactivas por varios días)."
+    ) from ultimo
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ejecutar consultas con reintento automatico
+# ─────────────────────────────────────────────────────────────────────────────
+# Desde algunas redes, el saludo cifrado (TLS) con AuraDB se corta a medias de
+# vez en cuando (SSL UNEXPECTED_EOF). No es un error de la consulta: si se
+# vuelve a intentar un segundo despues, funciona.
+#
+# session.run() NO reintenta. driver.execute_query() si: corre la consulta
+# dentro de una transaccion administrada que reintenta sola ante
+# ServiceUnavailable y SessionExpired durante hasta 30 segundos (documentacion
+# oficial del driver). Por eso todo el proyecto ejecuta Cypher a traves de
+# estas dos funciones y no con sesiones sueltas.
+#
+# leer() pide un servidor de lectura y escribir() uno de escritura; en Aura
+# Free es el mismo, pero declararlo deja claro que hace cada consulta.
+
+_INTENTOS_VERIFICACION = 4
+
+
+def leer(consulta: str, **parametros) -> list[dict]:
+    """Ejecuta una consulta de solo lectura y devuelve las filas como dicts."""
+    _, _, _, base = _leer_config()
+    filas, _, _ = obtener_driver().execute_query(
+        consulta, parametros, routing_=RoutingControl.READ, database_=base
+    )
+    return [f.data() for f in filas]
+
+
+def escribir(consulta: str, **parametros) -> list[dict]:
+    """Ejecuta una consulta que modifica el grafo y devuelve las filas."""
+    _, _, _, base = _leer_config()
+    filas, _, _ = obtener_driver().execute_query(
+        consulta, parametros, routing_=RoutingControl.WRITE, database_=base
+    )
+    return [f.data() for f in filas]
 
 
 @contextmanager
