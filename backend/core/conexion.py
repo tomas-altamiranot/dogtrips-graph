@@ -6,8 +6,8 @@ pide sesiones aquí y nunca construye su propio driver.
 
 from __future__ import annotations
 
+import logging
 import os
-import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -32,6 +32,13 @@ load_dotenv(RAIZ / ".env")
 # suplantación. Se usa setdefault para respetar un valor que ya venga del
 # entorno.
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+
+# Cuando el driver reintenta una consulta (ver leer() mas abajo) escribe un
+# aviso por cada intento fallido, algunos con nivel ERROR justo antes de lanzar
+# la excepcion que el reintento atrapa. Son reintentos que terminan bien, asi
+# que el log del driver se silencia para no ensuciar la terminal. Un fallo
+# definitivo NO se pierde: llega al codigo como excepcion y se muestra.
+logging.getLogger("neo4j").setLevel(logging.CRITICAL)
 
 _driver: Driver | None = None
 
@@ -104,25 +111,22 @@ def verificar_conexion() -> str:
         ErrorDeConexion: si el servidor no responde o las credenciales fallan.
     """
     uri, _, _, _ = _leer_config()
-    # verify_connectivity() no reintenta por su cuenta. Como el saludo TLS con
-    # Aura a veces se corta a medias (ver leer()), se le dan unos intentos
-    # antes de declarar que la base no responde.
-    ultimo: Exception | None = None
-    for intento in range(_INTENTOS_VERIFICACION):
-        try:
-            obtener_driver().verify_connectivity()
-            return uri
-        except AuthError as exc:
-            raise ErrorDeConexion(
-                "Credenciales rechazadas por AuraDB. Revisa NEO4J_USERNAME y NEO4J_PASSWORD."
-            ) from exc
-        except (ServiceUnavailable, SessionExpired) as exc:
-            ultimo = exc
-            time.sleep(1 + intento)
-    raise ErrorDeConexion(
-        f"No se pudo alcanzar {uri}. Revisa la URI y que la instancia esté activa "
-        "(Aura Free suspende las instancias inactivas por varios días)."
-    ) from ultimo
+    # verify_connectivity() no reintenta por su cuenta, y el saludo TLS con
+    # Aura a veces se corta a medias (ver leer()). Por eso la verificacion es
+    # una consulta trivial que pasa por leer(): hereda sus reintentos de hasta
+    # 30 segundos antes de declarar que la base no responde.
+    try:
+        leer("RETURN 1 AS ok")
+    except AuthError as exc:
+        raise ErrorDeConexion(
+            "Credenciales rechazadas por AuraDB. Revisa NEO4J_USERNAME y NEO4J_PASSWORD."
+        ) from exc
+    except (ServiceUnavailable, SessionExpired) as exc:
+        raise ErrorDeConexion(
+            f"No se pudo alcanzar {uri}. Revisa la URI y que la instancia esté activa "
+            "(Aura Free suspende las instancias inactivas por varios días)."
+        ) from exc
+    return uri
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,8 +144,6 @@ def verificar_conexion() -> str:
 #
 # leer() pide un servidor de lectura y escribir() uno de escritura; en Aura
 # Free es el mismo, pero declararlo deja claro que hace cada consulta.
-
-_INTENTOS_VERIFICACION = 4
 
 
 def leer(consulta: str, **parametros) -> list[dict]:
